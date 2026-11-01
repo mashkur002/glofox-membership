@@ -1,0 +1,10 @@
+# Test-only credentials for SecurityConfig. Production values come from the
+# environment variables of the same names and have no defaults.
+#
+# This file sits at classpath:/config/ so Spring Boot loads it IN ADDITION to
+# src/main/resources/application.yml rather than shadowing it. It exists only
+# on the test classpath and is never packaged into the jar.
+MEMBERSHIPS_ADMIN_USERNAME: test-admin
+MEMBERSHIPS_ADMIN_PASSWORD: test-admin-password
+MEMBERSHIPS_USER_USERNAME: test-user
+MEMBERSHIPS_USER_PASSWORD: test-user-password

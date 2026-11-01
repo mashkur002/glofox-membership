@@ -1,0 +1,21 @@
+# Java / Gradle build output
+build/
+.gradle/
+bin/
+out/
+*.class
+
+# The wrapper jar is intentionally tracked — gradlew cannot bootstrap without it.
+!gradle/wrapper/gradle-wrapper.jar
+
+# OS
+.DS_Store
+
+# Editors
+.idea/
+.vscode/
+*.swp
+
+# Agent tooling — local-only state, not shared protocol
+.claude/settings.local.json
+.planning/
