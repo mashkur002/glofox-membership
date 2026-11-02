@@ -5,16 +5,14 @@ the seeded plans, purchases a membership through a payment port, fetches a
 purchase, and soft-cancels one. Storage is in-memory, and every business rule is
 safe under concurrent requests.
 
-This was built as the Glofox backend take-home, and the original brief is
-reproduced in the [appendix](#appendix-original-exercise-brief). The design
-rationale is in [`SUBMISSION.md`](SUBMISSION.md),
-[`docs/01-prd/PRD.md`](docs/01-prd/PRD.md) and
-[`docs/02-trd/TRD.md`](docs/02-trd/TRD.md).
+Design rationale, trade-offs and production considerations are in
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). Submission notes (assumptions,
+test evidence, known gaps) are in [`SUBMISSION.md`](SUBMISSION.md).
 
 ## Contents
 
 1. [Overview](#1-overview)
-2. [Running it](#2-running-it)
+2. [Running it](#2-running-it) (local and AWS Elastic Beanstalk)
 3. [API](#3-api)
 4. [Functional scope](#4-functional-scope)
 5. [Non-functional requirements](#5-non-functional-requirements)
@@ -29,7 +27,7 @@ rationale is in [`SUBMISSION.md`](SUBMISSION.md),
 | | |
 |---|---|
 | Language / runtime | Java 21 |
-| Framework | Spring Boot 4.0.0 (Spring Framework 7, Spring Security), Jackson 3 |
+| Framework | Spring Boot 4.0.0 (Spring Framework 7): `spring-boot-starter-webmvc`, `spring-boot-starter-security`, `springdoc-openapi-starter-webmvc-ui` 3.0.3; Jackson 3 |
 | Build | Gradle 9.5.1 wrapper (Kotlin DSL) |
 | Tests | JUnit Jupiter 6, AssertJ, Mockito, MockMvc |
 | Storage | In-memory, behind ports so a database could be swapped in |
@@ -54,7 +52,7 @@ boot instead of leaving a guessable password in place.
 ```bash
 export MEMBERSHIPS_ADMIN_USERNAME=admin MEMBERSHIPS_ADMIN_PASSWORD='change-me-admin'
 export MEMBERSHIPS_USER_USERNAME=user   MEMBERSHIPS_USER_PASSWORD='change-me-user'
-./gradlew bootRun        # serves on :5000 and logs the 4 seeded plans
+./gradlew bootRun        # serves on :8080 and logs the 4 seeded plans
 ```
 
 In PowerShell, set the same four variables first:
@@ -62,10 +60,49 @@ In PowerShell, set the same four variables first:
 ```powershell
 $env:MEMBERSHIPS_ADMIN_USERNAME='admin'; $env:MEMBERSHIPS_ADMIN_PASSWORD='change-me-admin'
 $env:MEMBERSHIPS_USER_USERNAME='user';   $env:MEMBERSHIPS_USER_PASSWORD='change-me-user'
-./gradlew bootRun
+.\gradlew.bat bootRun
 ```
 
 The two usernames must differ.
+
+### Port
+
+The port comes from the `PORT` environment variable and defaults to `8080`
+(`server.port: ${PORT:8080}` in `application.yml`). The same jar runs everywhere.
+
+| Environment | `PORT` | Listens on |
+|---|---:|---:|
+| Local development | not set | 8080 |
+| Local override | `9090` | 9090 |
+| AWS Elastic Beanstalk | `5000` | 5000 |
+
+```bash
+PORT=9090 ./gradlew bootRun                      # Linux / macOS
+```
+
+```powershell
+$env:PORT = "9090"; .\gradlew.bat bootRun        # PowerShell
+```
+
+### AWS Elastic Beanstalk (Java SE platform)
+
+Beanstalk's nginx proxy forwards port 80 to the application on port 5000.
+[`.ebextensions/01-port.config`](.ebextensions/01-port.config) sets `PORT=5000`
+as an environment property, and Spring Boot binds to all interfaces (`0.0.0.0`)
+by default, so nothing else is needed.
+
+1. `./gradlew bootJar` builds `build/libs/*.jar`.
+2. Deploy a source bundle (zip) that contains that jar at its root together with
+   the `.ebextensions/` directory. `.ebextensions` is read only from a source
+   bundle; if you upload the bare jar, set `PORT=5000` in the environment's
+   configuration instead.
+3. Set the four `MEMBERSHIPS_*` credentials as environment properties in the
+   Beanstalk console or with `eb setenv`. They are never committed, and the app
+   refuses to start without them.
+
+The proxy-to-port wiring follows Beanstalk's documented defaults for the Java SE
+platform. It has not been exercised against a live environment from this
+repository.
 
 ### API documentation
 
@@ -73,9 +110,9 @@ Once the app is running, the API is documented at:
 
 | Page | URL |
 |---|---|
-| Swagger UI | <http://localhost:5000/swagger-ui.html> |
-| ReDoc | <http://localhost:5000/redoc.html> |
-| OpenAPI spec (JSON) | <http://localhost:5000/v3/api-docs> |
+| Swagger UI | <http://localhost:8080/swagger-ui.html> |
+| ReDoc | <http://localhost:8080/redoc.html> |
+| OpenAPI spec (JSON) | <http://localhost:8080/v3/api-docs> |
 
 These pages and the spec are public and need no credentials. Every `/v1/**`
 endpoint still requires HTTP Basic auth; use **Authorize** in Swagger UI to
@@ -100,14 +137,14 @@ denied.
 | `POST` | `/v1/memberships/purchases/{id}/cancel` | `200`, the purchase with `status: "cancelled"` |
 
 ```bash
-curl -u user:change-me-user -X POST localhost:5000/v1/memberships/purchases \
+curl -u user:change-me-user -X POST localhost:8080/v1/memberships/purchases \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: 2f1c6a0e-order-42' \
   -d '{"member_name":"Alice","plan_id":"33333333-3333-3333-3333-333333333333","start_date":"2027-01-15"}'
 ```
 
-`start_date` has to be today or later in the server's timezone. The brief's
-example date, `2026-09-01`, is now in the past and gets a `400`.
+`start_date` has to be today or later in the server's timezone. A past date
+gets `400 start_date_in_past`.
 
 A purchase response has these fields:
 
@@ -125,14 +162,24 @@ A plan has `id`, `name`, `type` (`unlimited` or `pack`), `active`,
 are always present. A `null` means "doesn't apply" or "unlimited", which is a
 different answer from `0`.
 
-On an `Idempotency-Key` replay you get the original `201` and body back, with
-`Idempotency-Replayed: true`, and nothing is charged a second time.
+### Idempotency: replay versus retrieval
+
+- **Idempotent replay.** Repeating a successful `POST` with the same
+  `Idempotency-Key` and an identical body returns the *original* `201` and body,
+  with `Idempotency-Replayed: true`. Nothing is charged a second time. The
+  replayed body is the response the first request produced: if the purchase has
+  since been cancelled, the replay still shows `status: "active"`, and if its
+  `start_date` has since passed, the replay still succeeds.
+- **Resource retrieval.** `GET /v1/memberships/purchases/{id}` returns the
+  purchase's *current* state. Use it when you need the latest status.
+- The same key with a different body is `409 idempotency_key_reuse`. If the
+  first request with a key fails, the key is released and can be retried.
 
 ### Error contract
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `validation_failed` | A field is missing or too long, the date or JSON is malformed, the path id isn't a UUID, or the name is blank. Field errors are listed in `errors[]` |
+| 400 | `validation_failed` | A field is missing, too long or blank (whitespace-only `member_name`), or the date is malformed; these are listed in `errors[]` as `{field, message}`. Also returned, without `errors[]`, when the body is unreadable (malformed JSON, or a JSON `null` body) or the path id isn't a UUID |
 | 400 | `start_date_in_past` | `start_date` is before today (server timezone) |
 | 401 | `unauthorized` | Credentials are missing or wrong. The response carries `WWW-Authenticate: Basic realm="memberships"` |
 | 403 | `forbidden` | The caller is authenticated, but the path is outside `/v1/**` |
@@ -165,7 +212,7 @@ On an `Idempotency-Key` replay you get the original `201` and body back, with
 | Stretch: structured errors with machine-readable codes | Implemented |
 | Stretch: payment decline (`402`) told apart from gateway outage (`502`) | Implemented. Nothing in this repo throws the outage type yet (see §10) |
 | Stretch: `GET /v1/memberships/purchases` with pagination | **Not implemented** |
-| HTTP Basic authentication | Implemented. This was added after the PRD (see §11) |
+| HTTP Basic authentication | Implemented (`config/SecurityConfig`); added beyond the original scope |
 
 ## 5. Non-functional requirements
 
@@ -178,9 +225,10 @@ On an `Idempotency-Key` replay you get the original `201` and body back, with
   Because nothing is serialised, 500 different members can buy in parallel.
 - **Atomicity without transactions.** A purchase runs reserve → charge → commit.
   Each claim pushes its undo onto a LIFO stack, and any failure unwinds the stack.
+  A successful charge is **not** reversible here (see §10).
 - **Swappable storage.** There are five ports in `store/`, and the in-memory
   adapters in `storage/memory/` carry no Spring annotations.
-- **Testability.** The service and domain layers import no Spring and are tested
+- **Testability.** The service, domain and storage layers import no Spring and are tested
   without an application context. Time comes from one injected `Clock`, held by
   only two collaborators.
 - **Security.**
@@ -194,7 +242,7 @@ On an `Idempotency-Key` replay you get the original `201` and body back, with
 
 ## 6. Deliberately out of scope
 
-PRD §3 explains each of these:
+[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) explains each of these:
 
 - durable persistence and multi-instance deployment
 - creating or editing plans
@@ -221,8 +269,10 @@ PRD §3 explains each of these:
 - **Cancel does its compare-and-set before restoring anything.** That way only
   one of several concurrent cancels gets to restore the slot. Cancelling issues
   no refund.
-- **The idempotency key claim is compensation entry #0.** A declined charge
-  therefore releases the key, and an honest retry succeeds.
+- **The idempotency key is claimed before the date and plan checks** and is
+  compensation entry #0. A completed key replays the original response without
+  re-validating; a new key still passes every check, and any failure (a past
+  date, a declined charge) releases it so an honest retry succeeds.
 - **Every rule conflict returns `409`**, and the `code` field says which rule. A
   malformed id is a `400`. An unknown id is a `404`.
 - **Payment failure detail is fixed text.** The gateway's own message stays in
@@ -236,19 +286,20 @@ PRD §3 explains each of these:
 HTTP request
   └─► Security filter chain        HTTP Basic, stateless; 401/403 rendered as problem+json
       └─► web/PurchaseController
-            PurchaseRequestValidator   shape only: presence, name length ≤ 100, strict YYYY-MM-DD
+            PurchaseRequestValidator   shape: presence, name not blank, length ≤ 100, strict YYYY-MM-DD
           └─► service/PurchaseService
-                1. name not blank          (MemberKey.isBlank)
-                2. start date not past     (StartDatePolicy)
-                3. plan exists, plan active
-                4. MemberKey from name
-                5. [Idempotency-Key] claim ──► replay / in-progress / conflict / acquired
+                1. name not blank          (backstop; MemberKey.isBlank)
+                2. MemberKey from name
+                3. [Idempotency-Key] claim ──► replay original / in-progress / conflict / acquired
+                4. start date not past     (StartDatePolicy)
+                5. plan exists, plan active
                 6. [unlimited plan]  claim member slot        ─┐ each pushes
                 7. [finite plan]     reserve promo slot       ─┘ its undo
-                8. PaymentGateway.charge   (no lock held)
+                8. PaymentGateway.charge   (no lock held; NOT undoable)
                 9. PurchaseFactory.create → PurchaseStore.save
-               10. [Idempotency-Key] complete
-                on any RuntimeException: unwind undo stack (LIFO), rethrow
+               10. [Idempotency-Key] complete with the purchase snapshot
+                on any RuntimeException: unwind undo stack (LIFO), rethrow;
+                if the charge had succeeded, log it at ERROR for reconciliation
           └─► web/PurchaseAssembler → DTO → 201 Created + Location
   errors ─► web/ApiExceptionHandler   one table: exception class → status + code
 ```
@@ -262,13 +313,14 @@ HTTP request
 | `store/` | **Ports.** Storage interfaces that expose atomic primitives (`tryReserve`, `tryClaim`, `compareAndSetStatus`, idempotency `claim`) | `domain` |
 | `storage/memory/` | **Adapters.** `ConcurrentHashMap` / `AtomicInteger` implementations of the ports | `store`, `domain` |
 | `service/` | Every business rule, the compensation stack, and the domain exceptions | `domain`, `store`, `payment` |
-| `payment/` | `PaymentGateway` port and the default always-succeeding bean (vendor) | — |
+| `payment/` | `PaymentGateway` port and the default always-succeeding bean (vendor) | Spring (`@Component` on the vendor bean) |
 | `web/` | Controllers, shape validation, DTOs, assemblers, exception-to-status mapping | `service`, `domain`, `store`, Spring |
 | `config/` | Bean wiring, seeding, the single `Clock`, security | everything, Spring |
 
-Only `config/` and `web/` import Spring. Today the code follows that rule by
-convention and the test suite guards it incidentally (TRD §1.2). No dedicated
-test enforces it.
+`domain/`, `store/`, `storage/` and `service/` import no Spring; beans are wired
+in `config/`. The one exception outside `config/` and `web/` is the vendor-owned
+`payment/AlwaysSucceedingPaymentGateway`, which is annotated `@Component` and
+left unchanged. The boundary is held by convention; no dedicated test enforces it.
 
 ## 9. Testing
 
@@ -281,9 +333,12 @@ The tests are organised by risk rather than by layer:
 3. **500 different members buying unlimited.** All of them succeed, which proves
    the rule isn't enforced by serialising everyone.
 4. **Payment failure.** Parameterised over decline, outage and the umbrella
-   exception. Nothing persists, inventory is restored, and the claim is released.
+   exception. Inventory is restored, the unlimited claim and the idempotency
+   key are released, and the original failure reaches the caller.
 5. **500 concurrent cancels of one purchase.** The slot comes back exactly once.
 6. **500 concurrent requests with one idempotency key.** One charge in total.
+   Replays return the original response after a cancel and after the start
+   date has passed.
 7. **The full error contract**, security (401/403/roles), and bean wiring.
 
 The concurrency tests were mutation-checked, with detection rates measured over
@@ -303,198 +358,9 @@ without a Spring context.
   aren't scoped to the caller.
 - **Name normalisation only covers the ends of the string.** Look-alike letters
   and zero-width characters aren't folded.
-- **The "nothing persisted on payment failure" unit assertion is vacuous.**
+- **A successful charge cannot be reversed.** If the charge succeeds and saving
+  the purchase then fails, the slots and key are released but the member has
+  been charged with no purchase recorded. It is logged at ERROR with the
+  transaction id for manual reconciliation. The payment port has no refund, and
+  storage is in-memory. The production design is in `docs/ARCHITECTURE.md`.
 - **There's no CI pipeline, static analysis or coverage report** yet.
-
----
-
-## Appendix: original exercise brief
-
-The brief below is reproduced verbatim from the vendor skeleton.
-
-# Glofox — Memberships Purchase Take-Home
-
-Welcome, and thanks for interviewing with us.
-
-This is a **backend take-home exercise in Java**. Aim for about **2–3 hours** of focused work. A solid core beats an unfinished kitchen sink — stop around **3–4 hours** even if stretch goals are unfinished.
-
-You will discuss your submission in a follow-up technical conversation: design choices, trade-offs, and how you would evolve the system.
-
-## The domain
-
-Glofox is a SaaS platform for boutiques, studios, and gyms. Studio owners sell **memberships** (unlimited monthly plans and class packs) to members.
-
-Your task is to build a small **Memberships Purchase API** for one studio, using **in-memory** storage.
-
-## Timebox and what “done” means
-
-**Required (core):**
-
-1. `GET /v1/plans` — list seeded plans  
-2. `POST /v1/memberships/purchases` — purchase a membership  
-3. `GET /v1/memberships/purchases/{id}` — fetch a purchase by id  
-4. Automated tests for the behaviours you consider highest risk  
-5. A short write-up (`SUBMISSION.md`) with assumptions, API choices, known gaps, and approximate time spent  
-
-If those work and the business rules below hold, you are done enough to submit.
-
-## Pre-seeded plans
-
-Plans are defined in [`SeedData.java`](src/main/java/com/glofox/memberships/config/SeedData.java) and logged when the app starts. You do **not** need a create-plan endpoint — seed them into your store at startup.
-
-| Id | Name | Type | Active | Price (cents) | Credits | Remaining slots |
-|----|------|------|--------|---------------|---------|-----------------|
-| `11111111-1111-1111-1111-111111111111` | Monthly Unlimited | `unlimited` | yes | `8000` | — | — |
-| `22222222-2222-2222-2222-222222222222` | 10-Class Pack | `pack` | yes | `5000` | `10` | — |
-| `33333333-3333-3333-3333-333333333333` | Launch Promo Pack | `pack` | yes | `2500` | `5` | **`5`** |
-| `44444444-4444-4444-4444-444444444444` | Legacy Plan | `unlimited` | **no** | `6000` | — | — |
-
-`remaining_slots` is only set for the Launch Promo Pack. Other plans have unlimited inventory for this exercise.
-
-## Required API
-
-Use JSON. Request/response field names may be `snake_case` or `camelCase` — pick one and be consistent. Amounts must be integers in **cents**.
-
-### `GET /v1/plans`
-
-Return the seeded plans (including inactive ones). Include enough fields for a client to choose a plan (id, name, type, active, price in cents, credits / remaining slots when applicable).
-
-### `POST /v1/memberships/purchases`
-
-```http
-POST /v1/memberships/purchases
-Content-Type: application/json
-
-{
-  "member_name": "Alice",
-  "plan_id": "11111111-1111-1111-1111-111111111111",
-  "start_date": "2026-09-01"
-}
-```
-
-Expected behaviour:
-
-1. Validate request shape and semantics (blank name, invalid date, unknown plan, inactive plan, …).
-2. Charge via the provided [`PaymentGateway`](src/main/java/com/glofox/memberships/payment/PaymentGateway.java) port (default bean always succeeds; replace or stub it in tests to simulate failure).
-3. Create a purchase record (id, plan snapshot or plan id, amount in cents, status, start date, …).
-4. Enforce the business rules below.
-5. Return **`201 Created`** with a clear purchase payload including the purchase id and amount charged.
-
-### `GET /v1/memberships/purchases/{id}`
-
-Return the purchase, or an appropriate not-found response.
-
-## Business rules (required)
-
-- Monetary amounts are always integers in **cents** — never floats or decimal strings.
-- Dates are calendar dates (`YYYY-MM-DD`), not timestamps. Timezones are out of scope for this exercise.
-- You cannot purchase an **inactive** plan.
-- A member (identified by `member_name` for this exercise) may have **at most one active unlimited** membership at a time.
-- The **Launch Promo Pack** has finite `remaining_slots`. A successful purchase must decrement inventory. Concurrent purchases must **never** sell more than available or drive inventory below zero.
-- If payment **fails**, no purchase may remain and inventory must not change.
-
-## Deliberately open decisions
-
-These are not hidden requirements — make a coherent choice and be ready to explain it:
-
-- Exact error JSON shape and HTTP status mapping  
-- Package / layer layout beyond the hints in this repo  
-- Exact purchase response fields  
-- How you represent “active unlimited” membership  
-- Whether `member_name` uniqueness rules apply beyond the unlimited constraint  
-
-## Payment gateway
-
-[`PaymentGateway`](src/main/java/com/glofox/memberships/payment/PaymentGateway.java) is a port. [`AlwaysSucceedingPaymentGateway`](src/main/java/com/glofox/memberships/payment/AlwaysSucceedingPaymentGateway.java) is the default bean.
-
-In tests, provide an implementation that throws `PaymentGateway.PaymentFailedException` so you can assert that a failed charge leaves no purchase and does not consume promo inventory.
-
-## Storage
-
-Use **in-memory** storage. [`storage/memory`](src/main/java/com/glofox/memberships/storage/memory/) is an empty package waiting for your implementation — you may organise domain, service, and HTTP layers however you prefer.
-
-Design so swapping in a database-backed store later would be plausible.
-
-## What we evaluate
-
-- **Correctness** under the rules above, including payment failure and promo inventory  
-- **Where the rules live** — handler vs service vs storage, and why  
-- **Concurrency** — especially the last promo slots  
-- **Tests** — which ones you chose and why  
-- **Trade-offs you can defend** — simple and clear beats clever and opaque  
-- **Ownership** — you can walk through and modify your solution in the follow-up  
-
-Stretch features are optional. Core completeness beats volume.
-
-## A note on AI tools
-
-You are welcome to use AI assistants (Cursor, Copilot, ChatGPT, or anything else). Use them the way you would on the job: as a collaborator whose output you understand and own.
-
-In the follow-up we will ask you to walk through your code and the choices behind it. If you would rather not use AI, that is also fine.
-
-## Running the skeleton
-
-Requires **Java 21+** (the project uses a Java 21 toolchain).
-
-```bash
-./gradlew bootRun    # starts on :5000; logs seeded plan ids
-./gradlew test       # runs tests once you write them
-```
-
-No solution tests ship in this repo — write the ones that matter.
-
-## Suggested layout (optional)
-
-```text
-src/main/java/com/glofox/memberships/
-├── MembershipsApplication.java      # boots app; logs seed plans
-├── config/SeedData.java             # seeded plans
-├── payment/                         # PaymentGateway port + default success impl
-├── storage/memory/                  # empty — your in-memory store
-├── ...                              # your HTTP / domain / service packages
-```
-
-You may add Spring Web controllers, records, exceptions, etc. Prefer clarity over frameworks for their own sake.
-
-## Stretch (optional)
-
-Only if the core is solid — do not block submission on these:
-
-- `POST /v1/memberships/purchases/{id}/cancel` — soft cancel; restore promo inventory when applicable  
-- `Idempotency-Key` header on purchase  
-- `GET /v1/memberships/purchases` with `page` / `limit` / `has_more`  
-- Structured error body with machine-readable codes  
-- Distinguish payment decline vs gateway outage  
-
-## Submitting
-
-1. Complete the core scope and `SUBMISSION.md` (see template below).  
-2. Share your solution as instructed by your recruiter (zip, private repo, or branch).  
-
----
-
-### `SUBMISSION.md` template
-
-Copy to `SUBMISSION.md` and fill in:
-
-```markdown
-## Time spent
-Approximately: _
-
-## Assumptions
--
-
-## API / design choices
--
-
-## Tests
-What I covered and why:
-
-## Known gaps / what I would do next
--
-
-## AI tools used (optional)
--
-```
-
-Good luck — we look forward to talking through your solution.

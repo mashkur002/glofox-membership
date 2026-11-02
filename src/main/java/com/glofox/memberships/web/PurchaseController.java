@@ -47,6 +47,11 @@ public final class PurchaseController {
      * defensible, but then a client could not tell "your retry worked" from
      * "you fetched something", and the point is that a retry is
      * indistinguishable from the first call except for that header.
+     *
+     * <p><strong>Replay is not retrieval.</strong> The replayed body is the
+     * response the first request produced, even if the purchase has since been
+     * cancelled or its start date has passed. {@code GET /{id}} returns the
+     * purchase's current state.
      */
     @PostMapping
     ResponseEntity<PurchaseResponse> create(

@@ -3,7 +3,8 @@
 ## Time spent
 
 Approximately 3 hours on the required core, plus about an hour on the two
-stretch features, preceded by a design pass committed separately under `docs/`.
+stretch features, preceded by a design pass (summarised in
+`docs/ARCHITECTURE.md`).
 The build is green at every commit, and core was complete and merged before any
 stretch work began — so the core scope stands on its own.
 
@@ -13,8 +14,8 @@ stretch work began — so the core scope stands on its own.
   is `ACTIVE`; no expiry window is evaluated, so unlimited memberships never
   lapse. Chosen because the alternative needs a term length the seed data does
   not carry, and it keeps the clock out of every business rule.
-- **`member_name` is the member identity**, matched on a trimmed, case-folded
-  key. There is no member registry, so `"Alice"` and `" ALICE "` are one person
+- **`member_name` is the member identity**, matched on an NFC-normalised,
+  trimmed, case-folded key. There is no member registry, so `"Alice"` and `" ALICE "` are one person
   and two real people named Alice are indistinguishable.
 - **Pack credits are recorded but never spent.** Consuming them is out of scope.
 - **The plan is snapshotted onto the purchase**, so a later price change cannot
@@ -25,12 +26,10 @@ stretch work began — so the core scope stands on its own.
   is an instant from an injected clock.
 - **Single process.** Concurrency safety is in-process only; a second instance
   would need the real store.
-- **No authentication**, which is the root of the main security gap below.
-
-> **The README's example payload now returns `400`.** Its `start_date` is
-> `2026-09-01`, which is in the past, and past start dates are rejected. Use a
-> future date. Flagging it so a reviewer who tries the documented example finds
-> this acknowledged rather than discovers a surprise.
+- **Authentication is HTTP Basic** with two in-memory users whose credentials
+  come from the environment. It authenticates the *caller*, not the *member*:
+  any authenticated caller can still purchase under any `member_name`, which is
+  the root of the main security gap below.
 
 ## API / design choices
 
@@ -49,8 +48,12 @@ stretch work began — so the core scope stands on its own.
 - **`402` for a declined charge, `502` for a gateway outage.** The port's own
   javadoc already said "declined **or** the gateway errors"; two subtypes of the
   existing `PaymentFailedException` make that expressible without breaking any
-  caller that catches the umbrella type. This is the only vendor file changed,
-  in its own commit: 25 insertions, 0 deletions.
+  caller that catches the umbrella type. `PaymentGateway.java` gained 25 lines
+  and lost none. The skeleton's `application.yml` (snake_case naming,
+  springdoc paths, application name, `server.port: ${PORT:8080}`) and
+  `build.gradle.kts` (the security and springdoc dependencies) were also
+  changed; `SeedData`, `AlwaysSucceedingPaymentGateway` and
+  `MembershipsApplication` were not.
 - **Rules live in the service.** Controllers do shape validation and nothing
   else; stores own storage and the atomic primitives. Replace the web layer with
   a CLI and not one rule moves.
@@ -58,10 +61,11 @@ stretch work began — so the core scope stands on its own.
   are cheap and reversible, a charge is neither. Charging first and then finding
   the pack sold out would mean taking money for something undeliverable — a
   defect, not a trade-off.
-- **No `@Service`/`@Component` outside `config/` and `web/`.** The rule is that
-  only those two packages may import Spring, which makes the layering boundary a
-  single greppable command. The service is constructible by hand, and every
-  service test does exactly that.
+- **No Spring in `domain/`, `store/`, `storage/` or `service/`.** Beans are
+  wired in `config/`, so the service is constructible by hand, and every service
+  test does exactly that. The one Spring annotation outside `config/` and
+  `web/` is `@Component` on the vendor-owned
+  `payment/AlwaysSucceedingPaymentGateway`, left byte-identical.
 - **No `PlanService`.** Listing plans enforces no rule, and a pass-through layer
   added for symmetry is cost without benefit.
 - **The clock is reachable only through two collaborators that expose no
@@ -69,7 +73,7 @@ stretch work began — so the core scope stands on its own.
 
 ## Stretch features included
 
-Both are implemented and tested, after core was complete and merged.
+All are implemented and tested on this branch.
 
 - **`POST /v1/memberships/purchases/{id}/cancel`** — soft cancel, returning the
   promo slot and the member's unlimited slot. `200` with the updated purchase.
@@ -85,16 +89,26 @@ Both are implemented and tested, after core was complete and merged.
   fingerprint of the payload rather than by storing it again. A concurrent
   duplicate gets `409 idempotent_request_in_progress`.
 
+  **A replay returns the original response, not the current resource.** The
+  store keeps the immutable `Purchase` snapshot the first request returned, so a
+  retry after a cancel still replays `status: "active"`. `GET /{id}` is how a
+  client reads the current state. The key is claimed *before* the start-date
+  and plan checks, so a retry still replays after its `start_date` has passed.
+  A new key still goes through every check, and a failed check releases it.
+
   **An idempotency key is the same claim-or-fail pattern as the promo counter
   and the one-unlimited rule**, so the key claim became compensation entry #0 on
   the stack the purchase flow already had — reusing the existing unwind
   unchanged. No new concurrency mechanism was introduced, and it fixed the
   subtle case for free: a failed charge releases the key, so a client retrying
   after a declined card is not told "already in progress" forever.
+- **HTTP Basic authentication** on `/v1/**` (stateless, BCrypt-hashed users from
+  the environment, deny-by-default routing). 401 and 403 use the same
+  problem+json shape as every other error.
 
 ## Tests
 
-135 tests. Ordered by risk, not by layer.
+181 tests. Ordered by risk, not by layer.
 
 1. **Promo inventory under 500 concurrent purchases** — exactly 5 succeed, 495
    get `409 plan_sold_out`, the counter settles at 0, and **5 cards are charged,
@@ -106,8 +120,9 @@ Both are implemented and tested, after core was complete and merged.
 3. **500 *different* members buying unlimited** — all 500 succeed. This is what
    distinguishes "correct" from "serialised": one global lock would pass test 2
    while making the endpoint useless.
-4. **Payment failure, parameterised over decline / outage / umbrella type** — no
-   purchase persisted, inventory restored, and the unlimited claim released.
+4. **Payment failure, parameterised over decline / outage / umbrella type** —
+   inventory restored, the unlimited claim and the idempotency key released,
+   and the original failure propagated with nothing suppressed.
    Parameterising is deliberate: the claim-release assertion is the one likely
    to be written for only one failure mode, and unlimited plans have no
    inventory counter to notice the leak.
@@ -118,6 +133,8 @@ Both are implemented and tested, after core was complete and merged.
    slot comes back exactly once, never twice.
 7. **500 concurrent requests with one idempotency key** — one charge, and every
    other caller either replays the same purchase or is told it is in flight.
+   Replays are checked to return the original response after a cancel and
+   after the start date has passed.
 8. Error contract, all thirteen rows, including that a membership conflict does
    not echo the member name.
 
@@ -158,18 +175,21 @@ instead of sampling it.
 
 ## Known gaps / what I would do next
 
-1. **Name squatting (needs auth).** Anyone can claim the unlimited slot for any
-   name, and the denial is effectively permanent because releasing it requires
-   cancelling a purchase the victim cannot see. No validation fixes this —
-   `member_name` is being used as an identity without proof. Authentication, and
-   a real member id, is the fix.
+1. **Name squatting.** Any authenticated caller can claim the unlimited slot
+   for any name. HTTP Basic identifies the API client, not the member, so
+   `member_name` is still an identity without proof. A real member id bound to
+   the authenticated principal is the fix.
 2. **No gateway timeout.** `charge` can block indefinitely; a couple of hundred
    hanging requests would exhaust the servlet pool and take `GET /v1/plans` down
    with it. `PaymentGatewayUnavailableException` exists for exactly this and
    currently has no producer — a bounded timeout would give it one.
-3. **Charged with no record.** In-memory storage makes the gateway the only
-   durable record, so a crash between charging and saving destroys the only
-   local evidence. Needs persistence plus reconciliation against the gateway.
+3. **Charged with no record.** If the charge succeeds and saving the purchase
+   then fails, the unwind releases the slots and key, but the charge cannot be
+   reversed: the payment port has no refund or void. The service logs it at
+   ERROR with the transaction id. A process crash between the two steps loses
+   even that. The production design (authorise/capture, durable state before
+   the charge, provider idempotency keys, reconciliation, refund as a saga
+   step) is in `docs/ARCHITECTURE.md`.
 4. **Request body size is unbounded.** `member_name` is capped at 100
    characters, but the body itself is not; a `OncePerRequestFilter` with a
    content-length limit is the one-line fix.
@@ -177,8 +197,7 @@ instead of sampling it.
    invisible space is folded (including non-breaking space — see below), but
    interior spacing, zero-width characters and homoglyphs are not. Properly
    fixing this means a member registry, not more string handling.
-6. **Cancel and `Idempotency-Key` are implemented on a separate branch** and are
-   not part of the core submission.
+6. **Idempotency keys are never evicted.** A real store needs a TTL.
 
 ## AI tools used
 

@@ -9,6 +9,14 @@ import com.glofox.memberships.TestStores;
 import com.glofox.memberships.config.SeedData;
 import com.glofox.memberships.payment.CountingGateway;
 import com.glofox.memberships.payment.PaymentGateway.PaymentFailedException;
+import com.glofox.memberships.domain.Purchase;
+import com.glofox.memberships.domain.PurchaseStatus;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneId;
+import java.time.ZoneOffset;
 import java.util.List;
 import java.util.UUID;
 import org.junit.jupiter.api.DisplayName;
@@ -199,8 +207,8 @@ class PurchaseIdempotencyTest {
     @Test
     @DisplayName("a rejected request does not burn its key")
     void rejectedRequestDoesNotBurnTheKey() {
-        // An inactive plan is rejected before the key is ever claimed, so the
-        // same key stays usable for a corrected request.
+        // The key is claimed before the business checks run, so a rejection
+        // must release it; otherwise a corrected request would be refused.
         TestStores.Fixture f = TestStores.succeeding();
 
         assertThatExceptionOfType(PlanInactiveException.class)
@@ -208,7 +216,90 @@ class PurchaseIdempotencyTest {
                         .purchase("Alice", SeedData.LEGACY_PLAN_ID, TestStores.TODAY, "key-1"));
 
         assertThat(f.service().purchase("Alice", TEN_PACK, TestStores.TODAY, "key-1").replayed())
-                .as("the key was never claimed, so this is a fresh purchase")
+                .as("the key was released, so this is a fresh purchase")
                 .isFalse();
+    }
+
+    @Test
+    @DisplayName("a replay returns the original response, not the purchase's current state")
+    void replayAfterCancelReturnsTheOriginalResponse() {
+        TestStores.Fixture f = TestStores.succeeding();
+        Purchase original = f.service()
+                .purchase("Alice", TEN_PACK, TestStores.TODAY, "key-1").purchase();
+
+        f.service().cancel(original.id());
+        PurchaseOutcome retry = f.service().purchase("Alice", TEN_PACK, TestStores.TODAY, "key-1");
+
+        assertThat(retry.replayed()).isTrue();
+        assertThat(retry.purchase())
+                .as("idempotent replay is the original 201, status active")
+                .isEqualTo(original);
+        assertThat(retry.purchase().status()).isEqualTo(PurchaseStatus.ACTIVE);
+        assertThat(f.service().getById(original.id()).status())
+                .as("resource retrieval still shows the current state")
+                .isEqualTo(PurchaseStatus.CANCELLED);
+        assertThat(f.gateway().charges()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("a retry replays even after the original start date has passed")
+    void replayAfterStartDateHasPassed() {
+        MutableClock clock = new MutableClock(TestStores.FIXED_CLOCK.instant());
+        TestStores.Fixture f = TestStores.with(CountingGateway.succeeding(), clock);
+        LocalDate tomorrow = TestStores.TODAY.plusDays(1);
+        Purchase original = f.service()
+                .purchase("Alice", TEN_PACK, tomorrow, "key-1").purchase();
+
+        clock.advance(Duration.ofDays(3));
+
+        assertThatExceptionOfType(StartDateInPastException.class)
+                .as("a new request with that date is still rejected")
+                .isThrownBy(() -> f.service().purchase("Bob", TEN_PACK, tomorrow, "key-2"));
+        PurchaseOutcome retry = f.service().purchase("Alice", TEN_PACK, tomorrow, "key-1");
+        assertThat(retry.replayed()).isTrue();
+        assertThat(retry.purchase()).isEqualTo(original);
+        assertThat(f.gateway().charges()).isEqualTo(1);
+    }
+
+    @Test
+    @DisplayName("a key rejected for a past date is released and not stuck in progress")
+    void failedValidationReleasesTheKey() {
+        TestStores.Fixture f = TestStores.succeeding();
+
+        assertThatExceptionOfType(StartDateInPastException.class)
+                .isThrownBy(() -> f.service().purchase(
+                        "Alice", TEN_PACK, TestStores.TODAY.minusDays(1), "key-1"));
+
+        PurchaseOutcome corrected = f.service()
+                .purchase("Alice", TEN_PACK, TestStores.TODAY.minusDays(1).plusDays(1), "key-1");
+        assertThat(corrected.replayed()).isFalse();
+    }
+
+    /** A clock a test can move forward, for rules that depend on "today". */
+    private static final class MutableClock extends Clock {
+        private Instant now;
+
+        MutableClock(Instant start) {
+            this.now = start;
+        }
+
+        void advance(Duration by) {
+            now = now.plus(by);
+        }
+
+        @Override
+        public ZoneId getZone() {
+            return ZoneOffset.UTC;
+        }
+
+        @Override
+        public Clock withZone(ZoneId zone) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public Instant instant() {
+            return now;
+        }
     }
 }

@@ -17,15 +17,15 @@ take-home skeleton is vendored here, so there is real code to build and run.
 
 | Path | Owner | Notes |
 |---|---|---|
-| `context/` | human | Input: brief, constraints, verified stack facts |
-| `docs/01-prd` … `docs/05-interview-drill` | agent | Phase artifacts, one directory per phase |
+| `README.md` | agent | Primary entry point: running, API, error contract |
+| `SUBMISSION.md` | agent | Assumptions, test evidence, known gaps |
+| `docs/ARCHITECTURE.md` | agent | Consolidated design rationale and production considerations |
 | `src/`, `build.gradle.kts`, `gradlew` | vendor + agent | The application |
 | `STATE.md` | agent | Durable phase/approval anchor — read first, write last |
 
-Planning is complete and merged. Execution is in progress, driven by
-`docs/03-implementation/step_NN_*.md`, so **application code in `src/` is now
-expected** — earlier revisions of this file said the opposite, which was true
-only before the skeleton was imported.
+Planning and execution are complete; the step plans that drove execution are
+in git history. **Application code in `src/` is expected** and is changed only
+for approved remediation work.
 
 Three files are vendor-owned and must stay byte-identical:
 `config/SeedData.java`, `payment/AlwaysSucceedingPaymentGateway.java`, and
@@ -52,8 +52,8 @@ JUnit Jupiter 6. No new dependencies are needed by any step.
 
 1. Read `STATE.md` — it names the active phase, the last approved artifact, and the
    next step.
-2. Read `context/` — the codebase context, tasks, and constraints.
-3. Read only the `docs/` artifacts for the current and immediately prior phase.
+2. Read `docs/ARCHITECTURE.md`, then `README.md` and `SUBMISSION.md`.
+3. The original phase artifacts (`context/`, `docs/01-prd` … `docs/05-interview-drill`) were consolidated into `docs/ARCHITECTURE.md` and removed; they remain in git history at commit `542ec1f`.
 4. Resume at the state anchor. Do not re-ask questions already answered in
    committed artifacts.
 

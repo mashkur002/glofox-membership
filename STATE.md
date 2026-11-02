@@ -4,10 +4,10 @@ Durable mirror of the Current State Anchor. Read first, write last.
 
 ```
 ==================================================
-CURRENT PHASE: Post-execution remediation (first-phase E2E test findings)
-LAST APPROVED: M3 — one name-normalisation path (P2-3/4/5)
-NEXT STEP: Mandatory round closed (M1-M3 done, M4 skipped by user).
-           Awaiting User Input — optional P3 items, or merge development -> main
+CURRENT PHASE: Post-execution remediation -> Round 2 (refinements) complete
+LAST APPROVED: Round 2 plan — idempotency ordering + original-response replay,
+               blank/null validation, payment limitation, docs consolidation, PORT
+NEXT STEP: Awaiting User Input — push development, or further changes
 ==================================================
 ```
 
@@ -20,17 +20,25 @@ one per commit, each approved before it is written.
 | M1 generic payment `detail` | P2-1 | ✅ Done — 145 tests green; runtime F-01L..07L pass |
 | M2 strict `start_date` | P2-2 | ✅ Done — 147 tests green; runtime V-14..19, V-28/29 pass |
 | M3 one name-normalisation path | P2-3/4/5 | ✅ Done — 160 tests green; runtime V-09, V-38, U-11 pass; D-4 now NFC + trim + case-fold |
-| M4 non-vacuous persistence test | P3-8 | ⏭️ Skipped by user (2026-11-01) — test remains vacuous; known gap |
+| M4 non-vacuous persistence test | P3-8 | ✅ Resolved 2026-11-02 by removing the vacuous test (round 2, item 6) |
+
+**Round 2 (2026-11-02, branch `remediation/02-refinements`):** idempotency key
+claimed before date/plan checks; replay returns the stored original `Purchase`
+(not current state); whitespace-only `member_name` is a field error; JSON `null`
+body pinned as 400; orphaned successful charge logged at ERROR; `server.port:
+${PORT:8080}` plus `.ebextensions` for Beanstalk; README/SUBMISSION corrected;
+phase docs and `context/` consolidated into `docs/ARCHITECTURE.md` (originals in
+history at `542ec1f`).
 
 ## Build health
 
 | Check | Result |
 |---|---|
-| `./gradlew clean test` | **144 tests, 0 failures** |
-| Live end-to-end sweep | **23 of 23 assertions pass** |
+| `./gradlew clean test` | **181 tests, 0 failures** (2026-11-02) |
+| Live end-to-end sweep | Round 2: null body, blank name, replay-after-cancel, key reuse, PORT 8080/5000 all pass |
 | Concurrency suite repeatability | 10 consecutive clean runs, no flakes |
 | Vendor files byte-identical | `SeedData`, `AlwaysSucceedingPaymentGateway`, `MembershipsApplication`, `package-info`, `build.gradle.kts`, `settings.gradle.kts` |
-| Intentional vendor edits | `PaymentGateway.java` +25, `application.yml` +7 — **0 deletions** |
+| Intentional vendor edits | `PaymentGateway.java` +25; `application.yml` extended, and `server.port` now `${PORT:8080}` (was a fixed value) |
 | New dependencies added | none |
 
 ## Execution history

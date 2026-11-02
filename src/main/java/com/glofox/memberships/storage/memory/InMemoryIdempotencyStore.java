@@ -1,7 +1,7 @@
 package com.glofox.memberships.storage.memory;
 
+import com.glofox.memberships.domain.Purchase;
 import com.glofox.memberships.store.IdempotencyStore;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
@@ -14,8 +14,11 @@ import java.util.concurrent.ConcurrentMap;
  */
 public final class InMemoryIdempotencyStore implements IdempotencyStore {
 
-    /** A null {@code purchaseId} means the request is still in flight. */
-    private record Entry(String fingerprint, UUID purchaseId) {
+    /**
+     * A null {@code original} means the request is still in flight. Otherwise it
+     * is the immutable purchase snapshot returned by the first request.
+     */
+    private record Entry(String fingerprint, Purchase original) {
     }
 
     private final ConcurrentMap<String, Entry> entries = new ConcurrentHashMap<>();
@@ -33,18 +36,18 @@ public final class InMemoryIdempotencyStore implements IdempotencyStore {
         if (!existing.fingerprint().equals(fingerprint)) {
             return new Claim.Conflict();
         }
-        return existing.purchaseId() == null
+        return existing.original() == null
                 ? new Claim.InProgress()
-                : new Claim.Replay(existing.purchaseId());
+                : new Claim.Replay(existing.original());
     }
 
     @Override
-    public void complete(String key, UUID purchaseId) {
+    public void complete(String key, Purchase original) {
         Entry inFlight = entries.get(key);
         if (inFlight != null) {
             // Value-safe replace, as everywhere else: only the holder of this
             // exact in-flight entry may complete it.
-            entries.replace(key, inFlight, new Entry(inFlight.fingerprint(), purchaseId));
+            entries.replace(key, inFlight, new Entry(inFlight.fingerprint(), original));
         }
     }
 
@@ -53,7 +56,7 @@ public final class InMemoryIdempotencyStore implements IdempotencyStore {
         Entry inFlight = entries.get(key);
         // Only remove an entry that is still in flight. A completed entry must
         // survive so that retries keep replaying it.
-        if (inFlight != null && inFlight.purchaseId() == null) {
+        if (inFlight != null && inFlight.original() == null) {
             entries.remove(key, inFlight);
         }
     }

@@ -243,20 +243,46 @@ class PurchaseControllerTest {
     }
 
     @Test
-    @DisplayName("a blank name reaching the service maps to 400 validation_failed")
+    @DisplayName("a whitespace-only name is a field error on member_name, and the service is never called")
     void blankName() throws Exception {
-        willThrow(new BlankMemberNameException())
-                .given(service).purchase(any(), any(), any(), any());
-
         mvc.perform(post("/v1/memberships/purchases")
                         .contentType("application/json")
                         .content("""
-                                {"member_name":"  ",
+                                {"member_name":"   ",
                                  "plan_id":"11111111-1111-1111-1111-111111111111",
                                  "start_date":"2026-12-01"}
                                 """))
                 .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.code").value("validation_failed"))
+                .andExpect(jsonPath("$.errors.length()").value(1))
+                .andExpect(jsonPath("$.errors[0].field").value("member_name"))
+                .andExpect(jsonPath("$.errors[0].message").value("must not be blank"));
+
+        verify(service, never()).purchase(any(), any(), any(), any());
+    }
+
+    @Test
+    @DisplayName("a blank name caught by the service backstop still maps to 400 validation_failed")
+    void blankNameBackstop() throws Exception {
+        willThrow(new BlankMemberNameException())
+                .given(service).purchase(any(), any(), any(), any());
+
+        mvc.perform(post("/v1/memberships/purchases")
+                        .contentType("application/json").content(VALID_BODY))
+                .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.code").value("validation_failed"));
+    }
+
+    @Test
+    @DisplayName("a JSON null body is 400 validation_failed, never a 500")
+    void nullBody() throws Exception {
+        mvc.perform(post("/v1/memberships/purchases")
+                        .contentType("application/json").content("null"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.code").value("validation_failed"));
+
+        verify(service, never()).purchase(any(), any(), any(), any());
     }
 
     @Test
