@@ -4,10 +4,10 @@ Durable mirror of the Current State Anchor. Read first, write last.
 
 ```
 ==================================================
-CURRENT PHASE: Post-execution remediation -> Round 2 (refinements) complete
-LAST APPROVED: Round 2 plan — idempotency ordering + original-response replay,
-               blank/null validation, payment limitation, docs consolidation, PORT
-NEXT STEP: Awaiting User Input — push development, or further changes
+CURRENT PHASE: Post-execution remediation -> Round 3 (gateway timeout) complete
+LAST APPROVED: Round 3 design — timeout + bulkhead decorator, option A
+               (release on timeout, log late success for reconciliation)
+NEXT STEP: Awaiting User Input — push development, or next known gap
 ==================================================
 ```
 
@@ -30,11 +30,17 @@ ${PORT:8080}` plus `.ebextensions` for Beanstalk; README/SUBMISSION corrected;
 phase docs and `context/` consolidated into `docs/ARCHITECTURE.md` (originals in
 history at `542ec1f`).
 
+**Round 3 (2026-11-02, branch `remediation/03-gateway-timeout`):**
+`payment/TimeoutPaymentGateway` wraps the vendor gateway in `ServiceConfig`;
+`memberships.payment.timeout` (5s) and `max-concurrent-charges` (50); timeout or
+saturation gives 502; a late success is logged at ERROR. Wiring proven by a
+mutation check (unwired → integration test fails). Timing tests 5/5 stable.
+
 ## Build health
 
 | Check | Result |
 |---|---|
-| `./gradlew clean test` | **181 tests, 0 failures** (2026-11-02) |
+| `./gradlew clean test` | **187 tests, 0 failures** (2026-11-02, round 3) |
 | Live end-to-end sweep | Round 2: null body, blank name, replay-after-cancel, key reuse, PORT 8080/5000 all pass |
 | Concurrency suite repeatability | 10 consecutive clean runs, no flakes |
 | Vendor files byte-identical | `SeedData`, `AlwaysSucceedingPaymentGateway`, `MembershipsApplication`, `package-info`, `build.gradle.kts`, `settings.gradle.kts` |
