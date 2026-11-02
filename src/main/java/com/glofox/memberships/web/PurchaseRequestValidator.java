@@ -1,5 +1,6 @@
 package com.glofox.memberships.web;
 
+import com.glofox.memberships.domain.MemberKey;
 import com.glofox.memberships.web.dto.FieldErrorResponse;
 import com.glofox.memberships.web.dto.PurchaseRequest;
 import java.time.LocalDate;
@@ -19,9 +20,13 @@ import java.util.regex.Pattern;
  * <p><strong>Absence, length and the {@code start_date} format are checked
  * here.</strong> A malformed {@code plan_id} never reaches this method because
  * Jackson rejects it during binding; {@code start_date} arrives as a string and
- * is parsed strictly below. Blank-after-trim is the service's concern, since that is
- * a rule about member identity rather than about request shape — which is why
- * {@code ""} passes this validator and fails in the service.
+ * is parsed strictly below.
+ *
+ * <p><strong>Blank names are rejected here as a field error</strong>, using
+ * {@link MemberKey#isBlank} — the same definition of blank the member key uses,
+ * so there is one rule, not two. Rejecting it here means the client gets an
+ * {@code errors} entry naming {@code member_name}, like every other field
+ * failure. The service keeps its own check as a backstop for non-HTTP callers.
  */
 final class PurchaseRequestValidator {
 
@@ -77,6 +82,8 @@ final class PurchaseRequestValidator {
             // through, defeating the bound's purpose.
             errors.add(new FieldErrorResponse("member_name",
                     "must be at most " + MAX_MEMBER_NAME + " characters"));
+        } else if (MemberKey.isBlank(request.memberName())) {
+            errors.add(new FieldErrorResponse("member_name", "must not be blank"));
         }
         if (request.planId() == null) {
             errors.add(new FieldErrorResponse("plan_id", "must be provided"));
