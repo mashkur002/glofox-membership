@@ -1,5 +1,6 @@
 server:
-  port: 5000
+  # Local default 8080; Elastic Beanstalk supplies PORT=5000 (see .ebextensions).
+  port: ${PORT:8080}
 
 spring:
   application:
