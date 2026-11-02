@@ -108,7 +108,7 @@ All are implemented and tested on this branch.
 
 ## Tests
 
-181 tests. Ordered by risk, not by layer.
+187 tests. Ordered by risk, not by layer.
 
 1. **Promo inventory under 500 concurrent purchases** — exactly 5 succeed, 495
    get `409 plan_sold_out`, the counter settles at 0, and **5 cards are charged,
@@ -179,10 +179,13 @@ instead of sampling it.
    for any name. HTTP Basic identifies the API client, not the member, so
    `member_name` is still an identity without proof. A real member id bound to
    the authenticated principal is the fix.
-2. **No gateway timeout.** `charge` can block indefinitely; a couple of hundred
-   hanging requests would exhaust the servlet pool and take `GET /v1/plans` down
-   with it. `PaymentGatewayUnavailableException` exists for exactly this and
-   currently has no producer — a bounded timeout would give it one.
+2. **A timed-out charge may still land.** `TimeoutPaymentGateway` bounds each
+   charge (default 5s) and the number in flight (default 50), so a hanging
+   gateway yields a fast `502` instead of exhausting the servlet pool. A timeout
+   is not a decline, though: if the provider completes the charge later, it is
+   logged at ERROR for reconciliation, after the slot was already released.
+   Before this, `charge` could block indefinitely, and a couple of hundred
+   hanging requests would have taken `GET /v1/plans` down with them.
 3. **Charged with no record.** If the charge succeeds and saving the purchase
    then fails, the unwind releases the slots and key, but the charge cannot be
    reversed: the payment port has no refund or void. The service logs it at

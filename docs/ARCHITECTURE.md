@@ -14,7 +14,7 @@ on, and where the in-memory implementation stops short of production. The
 | `store/` | Ports: storage interfaces exposing atomic primitives | `domain` |
 | `storage/memory/` | In-memory adapters (`ConcurrentHashMap`, `AtomicInteger`) | `store`, `domain` |
 | `service/` | Every business rule, the compensation stack, the domain exceptions | `domain`, `store`, `payment` |
-| `payment/` | `PaymentGateway` port and the vendor's always-succeeding bean | — |
+| `payment/` | `PaymentGateway` port, the vendor's always-succeeding bean, and `TimeoutPaymentGateway` | — |
 | `web/` | Controllers, shape validation, DTOs, the exception-to-status table | `service`, `domain`, `store`, Spring |
 | `config/` | Bean wiring, seeding, the single `Clock`, security | everything, Spring |
 
@@ -140,6 +140,27 @@ infrastructure the exercise excludes:
    durable state, for example through an outbox, so a refund survives a
    restart.
 
+## 5a. Gateway timeout
+
+`ServiceConfig` wraps the gateway bean in `payment/TimeoutPaymentGateway` before
+handing it to the service. The vendor bean is untouched and stays the only
+`PaymentGateway` bean.
+
+- **Timeout.** The charge runs on a dedicated pool, and the request thread waits
+  at most `memberships.payment.timeout` (default `5s`). On expiry it throws
+  `PaymentGatewayUnavailableException`, which gives `502` and the normal unwind.
+- **Bulkhead.** The pool has `max-concurrent-charges` threads (default `50`) and
+  no queue. If the gateway hangs for good, abandoned calls fill the pool and
+  further charges are rejected immediately with `502`, instead of tying up
+  servlet threads. Other endpoints stay responsive.
+- **Delegate answers pass through unchanged.** A decline is still `402`.
+- **A timeout is not a decline.** Interrupting our thread cannot stop a remote
+  charge, so the abandoned call is watched instead. If it later succeeds, the
+  transaction id is logged at ERROR for reconciliation and refund (same
+  reasoning as §5). The client may retry meanwhile and be charged again;
+  reconciliation must catch that. Passing a provider idempotency key derived
+  from the request is the production fix.
+
 ## 6. Validation and error contract
 
 Errors are RFC 9457 `application/problem+json` with a stable machine-readable
@@ -160,7 +181,8 @@ exception-to-status decision is one row in `ApiExceptionHandler`.
   `purchase_already_cancelled`, `idempotency_key_reuse` and
   `idempotent_request_in_progress`.
 - **Payment.** A decline is `402 payment_declined`; an outage is
-  `502 payment_gateway_error`. They mean opposite things to a client: try
+  `502 payment_gateway_error` (including a timeout or a saturated charge
+  pool). They mean opposite things to a client: try
   another card, or retry the same one. The `detail` is fixed text, and the
   gateway's own message stays in the server log.
 - **A past `start_date`** is `400 start_date_in_past`.
@@ -189,7 +211,7 @@ exception-to-status decision is one row in `ApiExceptionHandler`.
 | Input bounds | `member_name` is capped at 100 characters; the request body size is not bounded |
 | Log injection | Caller-supplied values are sanitised before logging, and most log lines use the server-generated purchase id |
 | Information leaks | Unexpected errors return fixed text. A membership conflict never echoes the member name, which would otherwise make the endpoint an existence oracle |
-| Gateway timeout | None. A hanging gateway would exhaust the servlet thread pool. `PaymentGatewayUnavailableException` exists but has no producer |
+| Gateway timeout | `TimeoutPaymentGateway` (§5a): each charge is bounded by `memberships.payment.timeout`, and at most `max-concurrent-charges` run at once. Beyond either limit the result is `502 payment_gateway_error` |
 | Transport | TLS is expected to terminate at the load balancer or proxy |
 
 ## 9. Performance
