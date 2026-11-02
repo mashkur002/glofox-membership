@@ -13,6 +13,16 @@ spring:
     # break that contract.
     property-naming-strategy: SNAKE_CASE
 
+memberships:
+  payment:
+    # How long a purchase waits for the gateway before failing with
+    # 502 payment_gateway_error. A charge that lands later is logged at ERROR
+    # for reconciliation (see TimeoutPaymentGateway).
+    timeout: 5s
+    # Charges allowed in flight at once. When all are held (a hung gateway),
+    # new charges fail fast with 502 instead of tying up servlet threads.
+    max-concurrent-charges: 50
+
 logging:
   level:
     root: INFO

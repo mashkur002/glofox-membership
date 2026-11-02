@@ -192,7 +192,7 @@ different answer from `0`.
 | 409 | `purchase_already_cancelled` | Cancel was called on a purchase that's already cancelled |
 | 409 | `idempotency_key_reuse` | The same key came with a different payload |
 | 409 | `idempotent_request_in_progress` | The same key arrived while the first request was still running |
-| 502 | `payment_gateway_error` | The gateway couldn't be reached, so the charge is unconfirmed |
+| 502 | `payment_gateway_error` | The gateway couldn't be reached, didn't answer within `memberships.payment.timeout`, or already has `max-concurrent-charges` calls in flight. The charge is unconfirmed |
 | 500 | `internal_error` | Something unexpected happened. Details go to the log and are never returned |
 
 ## 4. Functional scope
@@ -210,7 +210,8 @@ different answer from `0`.
 | Stretch: soft cancel that restores promo and unlimited slots | Implemented, race-safe |
 | Stretch: `Idempotency-Key` on purchase | Implemented |
 | Stretch: structured errors with machine-readable codes | Implemented |
-| Stretch: payment decline (`402`) told apart from gateway outage (`502`) | Implemented. Nothing in this repo throws the outage type yet (see §10) |
+| Stretch: payment decline (`402`) told apart from gateway outage (`502`) | Implemented. A gateway timeout or saturation produces the `502` |
+| Gateway timeout and bulkhead | Implemented: `memberships.payment.timeout` (default `5s`) and `memberships.payment.max-concurrent-charges` (default `50`) |
 | Stretch: `GET /v1/memberships/purchases` with pagination | **Not implemented** |
 | HTTP Basic authentication | Implemented (`config/SecurityConfig`); added beyond the original scope |
 
@@ -313,7 +314,7 @@ HTTP request
 | `store/` | **Ports.** Storage interfaces that expose atomic primitives (`tryReserve`, `tryClaim`, `compareAndSetStatus`, idempotency `claim`) | `domain` |
 | `storage/memory/` | **Adapters.** `ConcurrentHashMap` / `AtomicInteger` implementations of the ports | `store`, `domain` |
 | `service/` | Every business rule, the compensation stack, and the domain exceptions | `domain`, `store`, `payment` |
-| `payment/` | `PaymentGateway` port and the default always-succeeding bean (vendor) | Spring (`@Component` on the vendor bean) |
+| `payment/` | `PaymentGateway` port, the default always-succeeding bean (vendor), and `TimeoutPaymentGateway` (timeout + bulkhead decorator) | Spring (`@Component` on the vendor bean only) |
 | `web/` | Controllers, shape validation, DTOs, assemblers, exception-to-status mapping | `service`, `domain`, `store`, Spring |
 | `config/` | Bean wiring, seeding, the single `Clock`, security | everything, Spring |
 
@@ -349,7 +350,10 @@ without a Spring context.
 
 `SUBMISSION.md` gives the reasons for each:
 
-- **No gateway timeout.** `PaymentGatewayUnavailableException` has no producer yet.
+- **A timed-out charge may still land.** A timeout returns `502` and releases
+  the slot, but the provider may complete the charge later. That late success is
+  logged at ERROR with the transaction id for reconciliation; it is not refunded
+  automatically.
 - **Idempotency keys are never evicted.** The request body size isn't bounded either.
 - **Framework errors use a different shape.** 404, 405 and 415 come back in
   Boot's default error format rather than problem+json with a `code`.
