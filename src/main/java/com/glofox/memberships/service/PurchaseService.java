@@ -41,6 +41,20 @@ import org.slf4j.LoggerFactory;
  *
  * <p>Every claim pushes its own undo onto a stack. If anything later throws,
  * the stack unwinds in reverse and the original failure is rethrown.
+ *
+ * <h2>What the unwind cannot undo: a successful charge</h2>
+ *
+ * The charge is <strong>not</strong> on the compensation stack, because this
+ * service has no way to reverse it: the payment port exposes no refund or void.
+ * If the charge succeeds and saving the purchase then fails, the unwind
+ * releases the slot, the unlimited claim and the idempotency key, but the
+ * member has been charged with no purchase on record. That is logged at ERROR
+ * with the transaction id so it can be reconciled by hand. With in-memory
+ * storage, the only realistic trigger is the process dying between the two
+ * steps, which loses the log line's context along with everything else. The
+ * production design (authorise/capture, durable state before the charge,
+ * reconciliation, refund as a saga step) is described in
+ * {@code docs/ARCHITECTURE.md}.
  */
 public final class PurchaseService {
 
@@ -112,6 +126,9 @@ public final class PurchaseService {
         // plus Collections.reverse expresses the same thing as an extra step
         // someone can forget; here the data structure IS the LIFO requirement.
         Deque<Runnable> compensations = new ArrayDeque<>();
+        // Set only once the gateway reports success. Not a compensation: there
+        // is nothing in this codebase that can reverse it (see class docs).
+        PaymentGateway.PaymentResult charged = null;
 
         try {
             // --- entry #0: claim the idempotency key, if one was supplied ----
@@ -175,14 +192,13 @@ public final class PurchaseService {
             // --- charge. No lock is held across this call --------------------
             // Everything contended was settled by the two atomic claims above,
             // so the slowest operation in the flow blocks nobody.
-            PaymentGateway.PaymentResult result =
-                    gateway.charge(plan.priceCents(), memberName);
+            charged = gateway.charge(plan.priceCents(), memberName);
 
             // --- commit ------------------------------------------------------
             // memberName is stored as submitted, for display; the normalised key
             // is what matching uses.
             Purchase purchase = factory.create(purchaseId, memberName, key, plan,
-                                               startDate, result.transactionId());
+                                               startDate, charged.transactionId());
             purchases.save(purchase);
 
             // Recorded only after the purchase is saved, so a retry can never
@@ -197,6 +213,13 @@ public final class PurchaseService {
             // deliberate: this one path must also clean up after a sold-out
             // throw, a claim conflict, or anything a store does unexpectedly.
             unwind(compensations, original);
+            if (charged != null) {
+                // The unwind gave back every claim, but the money has moved.
+                // This needs a human or a reconciliation job, not a retry.
+                log.error("charge succeeded but purchase was not recorded; "
+                          + "requires reconciliation and refund: purchase={} transaction={}",
+                          purchaseId, forLog(charged.transactionId()), original);
+            }
             throw original;
         }
     }
