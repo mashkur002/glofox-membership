@@ -17,7 +17,7 @@ class ClockConfig {
 
     @Bean
     Clock clock() {
-        // Server zone, per the assumption recorded in the PRD: a studio operates
+        // Server zone, per the documented assumption: a studio operates
         // in one place and timezones are out of scope for this exercise.
         return Clock.systemDefaultZone();
     }

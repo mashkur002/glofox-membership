@@ -30,7 +30,7 @@ constraints across 5 strict phases.
 3. **No Filler** — Omit greetings, preambles, and meta-summaries. Dive straight
    into execution.
 4. **Clean Context** — Adhere strictly to the tech stack, directory structures,
-   and patterns of the repository described in `context/`. Do not import
+   and patterns of the repository described in `docs/ARCHITECTURE.md`. Do not import
    conventions from other ecosystems.
 
 ---
@@ -108,7 +108,7 @@ NEXT STEP: [Awaiting User Input on Qs / Reviewing Section Z]
 This workflow intentionally spans multiple sessions. Chat history does not
 survive; files do.
 
-- **On session start:** read `STATE.md` first, then `context/`, then the artifacts
+- **On session start:** read `STATE.md` first, then `docs/ARCHITECTURE.md`, then the artifacts
   for the current and prior phases. Resume from the state anchor — do **not**
   re-ask settled questions or re-derive approved artifacts.
 - **On every approval:** write the artifact to disk, update `STATE.md`, and commit.
@@ -122,11 +122,12 @@ survive; files do.
 
 | Path | Purpose |
 |---|---|
-| `context/codebase-context.md` | The target repo's structure & tech stack (user-supplied) |
-| `context/tasks.md` | Skeleton tasks / the interview brief |
-| `context/constraints.md` | Project constraints, non-goals, time budget |
+| `README.md` | Primary entry point for the solution |
+| `SUBMISSION.md` | Assumptions, test evidence, known gaps |
+| `docs/ARCHITECTURE.md` | Consolidated design rationale and production considerations |
 | `STATE.md` | Durable phase/approval anchor — read first, write last |
-| `docs/01-prd/` → `docs/05-interview-drill/` | Phase artifacts, one directory per phase |
 
-`context/` is input, authored by the human partner. `docs/` is output, authored by
-the agent on approval.
+The original phase artifacts (`context/`, `docs/01-prd` … `docs/05-interview-drill`) were consolidated into `docs/ARCHITECTURE.md` and removed; they remain in git history at commit `542ec1f`. The phase paths named in §3 apply only if a
+new phase cycle is started.
+
+`docs/` is output, authored by the agent on approval.
