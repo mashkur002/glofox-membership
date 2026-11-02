@@ -99,18 +99,8 @@ public final class PurchaseService {
     public PurchaseOutcome purchase(String memberName, UUID planId, LocalDate startDate,
                                     String idempotencyKey) {
 
-        // --- semantics the service owns, cheapest first ----------------------
+        // --- request shape the service still guards (backstop) ---------------
         requireNonBlank(memberName);
-        startDates.requireNotPast(startDate);
-
-        // --- resolve the plan, then check its state --------------------------
-        Plan plan = catalogue.find(planId)
-                .orElseThrow(() -> new PlanNotFoundException(planId));
-        if (!plan.active()) {
-            // The decision is taken here rather than inside a throwing domain
-            // method, so every rule in this flow is visible in one place.
-            throw new PlanInactiveException(plan);
-        }
 
         // --- identity and the compensation stack -----------------------------
         MemberKey key = new MemberKey(memberName);
@@ -125,15 +115,22 @@ public final class PurchaseService {
 
         try {
             // --- entry #0: claim the idempotency key, if one was supplied ----
-            // Same claim-or-fail shape as the two below. Pushed first so it is
-            // released last, after the inventory and claim it guards.
+            // Claimed BEFORE the time-sensitive and state-dependent checks
+            // below. A retry of a request that already succeeded must replay
+            // the original result even if its start_date has since passed or
+            // the plan has since changed; re-validating first would turn a
+            // successful purchase into a 400 on retry. A brand-new key still
+            // goes through every check, and if one fails the unwind releases
+            // the key, so it is never left stuck in progress.
             boolean keyed = idempotencyKey != null && !idempotencyKey.isBlank();
             if (keyed) {
                 String fingerprint = fingerprintOf(memberName, planId, startDate);
                 switch (idempotency.claim(idempotencyKey, fingerprint)) {
-                    case IdempotencyStore.Claim.Replay(UUID existingId) -> {
-                        // Nothing is charged on this path. Return the original.
-                        return PurchaseOutcome.replayed(getById(existingId));
+                    case IdempotencyStore.Claim.Replay(Purchase original) -> {
+                        // Nothing is charged and nothing is looked up: this is
+                        // the response the first request returned, not the
+                        // purchase's current state.
+                        return PurchaseOutcome.replayed(original);
                     }
                     case IdempotencyStore.Claim.InProgress() ->
                             throw new IdempotentRequestInProgressException();
@@ -142,6 +139,18 @@ public final class PurchaseService {
                     case IdempotencyStore.Claim.Acquired() ->
                             compensations.push(() -> idempotency.release(idempotencyKey));
                 }
+            }
+
+            // --- business validation for a new request -----------------------
+            startDates.requireNotPast(startDate);
+
+            Plan plan = catalogue.find(planId)
+                    .orElseThrow(() -> new PlanNotFoundException(planId));
+            if (!plan.active()) {
+                // The decision is taken here rather than inside a throwing
+                // domain method, so every rule in this flow is visible in one
+                // place.
+                throw new PlanInactiveException(plan);
             }
 
             // --- claim the member's single unlimited slot --------------------
@@ -179,7 +188,7 @@ public final class PurchaseService {
             // Recorded only after the purchase is saved, so a retry can never
             // replay an id that is not yet retrievable.
             if (keyed) {
-                idempotency.complete(idempotencyKey, purchaseId);
+                idempotency.complete(idempotencyKey, purchase);
             }
             return PurchaseOutcome.created(purchase);
 

@@ -1,6 +1,6 @@
 package com.glofox.memberships.store;
 
-import java.util.UUID;
+import com.glofox.memberships.domain.Purchase;
 
 /**
  * Deduplicates retried purchase requests by caller-supplied key.
@@ -9,6 +9,14 @@ import java.util.UUID;
  * {@link UnlimitedClaimStore}: claim atomically, do the work, release if
  * anything fails. The third instance of one pattern rather than a third
  * pattern.
+ *
+ * <h2>Replay semantics: the original response, not the current resource</h2>
+ *
+ * A completed key stores the {@link Purchase} exactly as it was returned to the
+ * first caller. {@code Purchase} is an immutable record, so that snapshot is the
+ * original response: a retry after a cancel still replays {@code active}. Clients
+ * that want the latest state use resource retrieval
+ * ({@code GET /v1/memberships/purchases/{id}}) instead.
  */
 public interface IdempotencyStore {
 
@@ -29,8 +37,8 @@ public interface IdempotencyStore {
         record InProgress() implements Claim {
         }
 
-        /** This key already produced a purchase; return that one. */
-        record Replay(UUID purchaseId) implements Claim {
+        /** This key already produced a purchase; return it as originally returned. */
+        record Replay(Purchase original) implements Claim {
         }
 
         /** This key was used for a different payload. */
@@ -46,8 +54,11 @@ public interface IdempotencyStore {
      */
     Claim claim(String key, String fingerprint);
 
-    /** Records the purchase this key produced, so later retries replay it. */
-    void complete(String key, UUID purchaseId);
+    /**
+     * Records the purchase this key produced, as returned to the caller, so
+     * later retries replay that exact response.
+     */
+    void complete(String key, Purchase original);
 
     /**
      * Gives the key back after a failure.
