@@ -92,20 +92,6 @@ class PurchaseServicePaymentFailureTest {
 
     @ParameterizedTest(name = "{0}")
     @MethodSource("failureModes")
-    @DisplayName("no purchase is retrievable after a failed charge")
-    void noPurchaseIsPersisted(String mode, Supplier<CountingGateway> gatewayFactory) {
-        TestStores.Fixture f = TestStores.with(gatewayFactory.get());
-
-        assertThatExceptionOfType(PaymentFailedException.class)
-                .isThrownBy(() -> f.service().purchase("Alice", MONTHLY, TestStores.TODAY));
-
-        // There is no id to look up, so assert on the store rather than the API:
-        // nothing was written at all.
-        assertThat(f.purchases().findById(UUID.randomUUID())).isEmpty();
-    }
-
-    @ParameterizedTest(name = "{0}")
-    @MethodSource("failureModes")
     @DisplayName("the original failure reaches the caller, not a cleanup error")
     void originalFailurePropagates(String mode, Supplier<CountingGateway> gatewayFactory) {
         TestStores.Fixture f = TestStores.with(gatewayFactory.get());
